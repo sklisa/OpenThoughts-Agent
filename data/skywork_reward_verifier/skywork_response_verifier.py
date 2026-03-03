@@ -159,8 +159,8 @@ python3 -u /tests/test_state.py
 RESOURCES_TEMPLATE = '''
     [environment]
     cpus = 8
-    memory_mb = 16384
-    storage_mb = 10240
+    memory_mb = 2048
+    storage_mb = 4096
 '''
 
 def inject_skywork_response_verifier(dataset_dir: str):
