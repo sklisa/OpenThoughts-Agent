@@ -167,10 +167,9 @@ python3 -u /tests/test_state.py
 
 RESOURCES_TEMPLATE = '''
     [environment]
-    cpus = 2
+    cpus = 1
     memory_mb = 2048
     storage_mb = 4096
-    env = { HF_TOKEN = "${HF_TOKEN}" }
 '''
 
 def inject_skywork_response_verifier(dataset_dir: str):
@@ -179,7 +178,7 @@ def inject_skywork_response_verifier(dataset_dir: str):
     print(f"Injecting Skywork Response verifier into tasks at: {tasks_root}")
     
     base_toml = create_standard_task_toml()
-    updated_toml = base_toml.replace("timeout_sec = 720.0", "timeout_sec = 1200.0")
+    updated_toml = base_toml.strip() + "\n    env = { HF_TOKEN = \"${HF_TOKEN}\" }\n"
     skywork_task_toml = updated_toml.strip() + "\n" + RESOURCES_TEMPLATE + "\n"
 
     for task_dir in tasks_root.iterdir():
