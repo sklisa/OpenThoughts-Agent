@@ -14,7 +14,8 @@ import os
 import sys
 import json
 from pathlib import Path
-from transformers import AutoModelForSequenceClassification, AutoTokenizer
+from transformers import AutoTokenizer
+from huggingface_hub import InferenceClient
 
 def get_instruction_from_trajectory(trajectory_path: Path):
     """Extracts the core instruction from the first step of the trajectory."""
@@ -41,6 +42,28 @@ def get_instruction_from_trajectory(trajectory_path: Path):
             return content.strip()
     return ""
 
+def score_logit_remote(messages, model_id, hf_token):
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    text = tokenizer.apply_chat_template(messages, tokenize=False)
+    if tokenizer.bos_token and text.startswith(tokenizer.bos_token):
+        text = text[len(tokenizer.bos_token):]
+
+    client = InferenceClient(provider="hf-inference", api_key=hf_token)
+
+    # low-level call so we can pass pipeline params
+    out = client.text_classification(
+        text,
+        model=model_id,
+        function_to_apply="none",  # <-- no sigmoid/softmax
+        top_k=1,
+    )
+    print("Remote response:", out)
+
+    # out is usually a list of dicts; parse defensively
+    if isinstance(out, list) and out and isinstance(out[0], list):
+        out = out[0]
+    return float(out[0]["score"])
+
 def run_verifier():
     print("--- Starting Skywork Verification (Response File Mode) ---")
     
@@ -49,6 +72,14 @@ def run_verifier():
     response_path = Path("response.txt")
     reward_file = Path("/logs/verifier/reward.txt")
     
+    MODEL_ID = "Skywork/Skywork-Reward-V2-Qwen3-0.6B"
+    HF_TOKEN = os.environ.get("HF_TOKEN")
+
+    if not HF_TOKEN:
+        print("Error: HF_TOKEN not set in environment.")
+        reward_file.parent.mkdir(parents=True, exist_ok=True)
+        return
+
     if not traj_path.exists():
         print(f"Error: {traj_path} not found.")
         reward_file.parent.mkdir(parents=True, exist_ok=True)
@@ -85,37 +116,15 @@ def run_verifier():
     
     print(f"DEBUG: Messages sent to model: {json.dumps(messages, indent=2)}")
 
-    # 4. Load Model and Tokenizer
-    model_name = "Skywork/Skywork-Reward-V2-Qwen3-0.6B"
-    print(f"Loading Reward Model: {model_name}")
-    
-    print(f"Initializing Skywork model...")
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    rm = AutoModelForSequenceClassification.from_pretrained(
-        model_name,
-        device_map="auto",
-        trust_remote_code=True,
-        num_labels=1,
-    )
-    rm.eval()
+    # 4. Call Remote Reward Model
+    try:
+        score = score_logit_remote(messages, MODEL_ID, HF_TOKEN)
+        print(f"Remote raw score: {score:.6f}")
+    except Exception as e:
+        print(f"Remote API Call Failed: {e}")
+        return
 
-    # 5. Process and Score
-    messages_formatted = tokenizer.apply_chat_template(messages, tokenize=False)
-    
-    if tokenizer.bos_token is not None and messages_formatted.startswith(tokenizer.bos_token):
-        messages_formatted = messages_formatted[len(tokenizer.bos_token):]
-        
-    messages_tokenized = tokenizer(
-        messages_formatted, 
-        return_tensors="pt",
-        truncation=True,
-        max_length=4096
-    )
-
-    with torch.no_grad():
-        score = rm(**messages_tokenized).logits[0][0].item()
-
-    # 6. Clip Score [0, 100]
+    # 5. Clip Score [0, 100]
     final_reward = score
     if final_reward < 0:
         print(f"Clipping reward: original score {score:.6f} is less than 0")
@@ -124,7 +133,7 @@ def run_verifier():
         print(f"Clipping reward: original score {score:.6f} is greater than 100")
         final_reward = 100
 
-    # 7. Output Reward
+    # 6. Output Reward
     reward_file.parent.mkdir(parents=True, exist_ok=True)
     reward_file.write_text(f"{final_reward:.6f}")
     
@@ -158,9 +167,10 @@ python3 -u /tests/test_state.py
 
 RESOURCES_TEMPLATE = '''
     [environment]
-    cpus = 8
+    cpus = 2
     memory_mb = 2048
     storage_mb = 4096
+    env = { HF_TOKEN = "${HF_TOKEN}" }
 '''
 
 def inject_skywork_response_verifier(dataset_dir: str):
